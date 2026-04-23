@@ -1,16 +1,15 @@
 #0: get a get an initial answer
-import openai
+import os
 import re
 import subprocess
 import random
+from openai import OpenAI
 from GPT_chat import convert
 from GPT_chat import spilit
 from GPT_chat import readexistans
 from Config import config
 # from GPT_chat import Llama3chat
 from z3 import *
-
-openai.api_key = "******************************************************"
 
 maxkinduction=config.maxkinduction
 BMC = config.BMC
@@ -19,6 +18,85 @@ PROMPT=config.PROMPT
 LLM=config.LLM
 timeout_seconds = config.timeout_seconds
 maxkstep = config.maxkstep
+_openai_client = None
+_llm_usage_stats = {
+    "total_tokens": 0,
+}
+
+
+def _uses_openai():
+    return LLM not in {"Llama3", "Man", "Exist"}
+
+
+def _resolve_openai_model():
+    legacy_model_map = {
+        "GPT4": "gpt-4o",
+        "GPT4Turbo": "gpt-4o",
+        "GPT3.5Turbo": "gpt-4o-mini",
+    }
+    return legacy_model_map.get(LLM, LLM)
+
+
+def _get_openai_client():
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.getenv("OPENAI_API_KEY")
+        base_url = os.getenv("OPENAI_BASE_URL")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set.")
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        _openai_client = OpenAI(**client_kwargs)
+    return _openai_client
+
+
+def reset_llm_usage_stats():
+    _llm_usage_stats["total_tokens"] = 0
+
+
+def get_llm_usage_stats():
+    return dict(_llm_usage_stats)
+
+
+def _accumulate_usage(usage):
+    if usage is None:
+        return
+    total_tokens = getattr(usage, "total_tokens", None)
+    if total_tokens is None and isinstance(usage, dict):
+        total_tokens = usage.get("total_tokens")
+    if isinstance(total_tokens, int):
+        _llm_usage_stats["total_tokens"] += total_tokens
+
+
+def _prefer_chat_completions():
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+    return bool(base_url) and "api.openai.com" not in base_url
+
+
+def _generate_via_chat_completions(prompt):
+    completion = _get_openai_client().chat.completions.create(
+        model=_resolve_openai_model(),
+        messages=[{"role": "user", "content": prompt}],
+    )
+    _accumulate_usage(getattr(completion, "usage", None))
+    message = completion.choices[0].message
+    return message.content or ""
+
+
+def _generate_openai_text(prompt):
+    if _prefer_chat_completions():
+        return _generate_via_chat_completions(prompt)
+
+    try:
+        response = _get_openai_client().responses.create(
+            model=_resolve_openai_model(),
+            input=prompt,
+        )
+        _accumulate_usage(getattr(response, "usage", None))
+        return response.output_text or ""
+    except Exception:
+        return _generate_via_chat_completions(prompt)
 
 def is_parentheses_balanced(s):
     stack = []
@@ -51,11 +129,7 @@ assert({result}); => "
         if LLM == "Llama3":
             result=Llama3chat.getLlamaAnswer(prompt)
         else:
-            gptAnswer = openai.ChatCompletion.create(
-                    model="gpt-4", 
-                    messages=[{"role": "user", "content": prompt}]
-                )
-            result = gptAnswer["choices"][0]["message"]["content"]
+            result = _generate_openai_text(prompt)
 
         result=add_parentheses_to_pow_args(result)
         result=extract_assert_statements(result)
@@ -283,24 +357,8 @@ def translate_AnsSet_to_smtlib2(AnsSet):
 
 
 def get_answer(cProgram,promptType,previousAns,counterexample,AnsSet,existans,readexistanscount):
-    if LLM == "GPT4":
-        gptAnswer = openai.ChatCompletion.create(
-                model="gpt-4", 
-                messages=[{"role": "user", "content": get_prompt(cProgram,promptType,previousAns,counterexample)}]
-            )
-        result = gptAnswer["choices"][0]["message"]["content"]
-    elif LLM == "GPT4Turbo":
-        gptAnswer = openai.ChatCompletion.create(
-                model="gpt-4-turbo", 
-                messages=[{"role": "user", "content": get_prompt(cProgram,promptType,previousAns,counterexample)}]
-            )
-        result = gptAnswer["choices"][0]["message"]["content"]
-    elif LLM == "GPT3.5Turbo":
-        gptAnswer = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo", 
-                messages=[{"role": "user", "content": get_prompt(cProgram,promptType,previousAns,counterexample)}]
-            )
-        result = gptAnswer["choices"][0]["message"]["content"]
+    if _uses_openai():
+        result = _generate_openai_text(get_prompt(cProgram,promptType,previousAns,counterexample))
     elif LLM == "Man":
         print("Input loop invariant:")
         result=input()
@@ -353,6 +411,8 @@ def add_precondition(cProgram,preconditions):
     result = preconditions
     smtlib2=convert.convert_c_assert_list_to_smtlib2(result)
     AnsSet = []
+    if not BMC:
+        return smtlib2,result,AnsSet
 
     for index in range(len(result)):
         CAssertion=result[index]

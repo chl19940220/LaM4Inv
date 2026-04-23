@@ -2,6 +2,7 @@ from z3 import *
 set_param('parallel.enable', True)
 from Config import config
 from Utilities.TimeController import time_limit_calling
+import time
 
 class Counterexample:
     kind = "?"
@@ -10,6 +11,9 @@ class Counterexample:
 
 class SMT_verifier:
     tpl = []
+
+    def __init__(self):
+        self.total_solver_time = 0.0
 
     def initTpl(self, path2SMT):
         vc_sections = [""]
@@ -44,7 +48,9 @@ class SMT_verifier:
                 print("SMTLIB2 False!")
                 return None, False
             sol.add(decl)
+            solve_start_time = time.time()
             r = time_limit_calling(sol.check, (), config.SMT_CHECK_TIME)
+            self.total_solver_time += time.time() - solve_start_time
 
             kind = "?"
             ce = {}
@@ -89,6 +95,8 @@ class SMT_verifier:
 
         return None,True  # we find the answer
 
+    def get_total_solver_time(self):
+        return self.total_solver_time
 
 
 
