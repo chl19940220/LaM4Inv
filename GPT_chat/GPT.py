@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import random
+import threading
 from openai import OpenAI
 from GPT_chat import convert
 from GPT_chat import spilit
@@ -18,10 +19,15 @@ PROMPT=config.PROMPT
 LLM=config.LLM
 timeout_seconds = config.timeout_seconds
 maxkstep = config.maxkstep
-_openai_client = None
-_llm_usage_stats = {
-    "total_tokens": 0,
-}
+_thread_state = threading.local()
+
+
+def _get_thread_state():
+    if not hasattr(_thread_state, "openai_client"):
+        _thread_state.openai_client = None
+    if not hasattr(_thread_state, "total_tokens"):
+        _thread_state.total_tokens = 0
+    return _thread_state
 
 
 def _uses_openai():
@@ -38,8 +44,8 @@ def _resolve_openai_model():
 
 
 def _get_openai_client():
-    global _openai_client
-    if _openai_client is None:
+    thread_state = _get_thread_state()
+    if thread_state.openai_client is None:
         api_key = os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("OPENAI_BASE_URL")
         if not api_key:
@@ -47,16 +53,16 @@ def _get_openai_client():
         client_kwargs = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
-        _openai_client = OpenAI(**client_kwargs)
-    return _openai_client
+        thread_state.openai_client = OpenAI(**client_kwargs)
+    return thread_state.openai_client
 
 
 def reset_llm_usage_stats():
-    _llm_usage_stats["total_tokens"] = 0
+    _get_thread_state().total_tokens = 0
 
 
 def get_llm_usage_stats():
-    return dict(_llm_usage_stats)
+    return {"total_tokens": _get_thread_state().total_tokens}
 
 
 def _accumulate_usage(usage):
@@ -66,7 +72,7 @@ def _accumulate_usage(usage):
     if total_tokens is None and isinstance(usage, dict):
         total_tokens = usage.get("total_tokens")
     if isinstance(total_tokens, int):
-        _llm_usage_stats["total_tokens"] += total_tokens
+        _get_thread_state().total_tokens += total_tokens
 
 
 def _prefer_chat_completions():
